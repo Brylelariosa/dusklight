@@ -1,0 +1,147 @@
+name: Android APK
+
+# Save as .github/workflows/android-apk.yml
+# Builds a signed, installable arm64-v8a APK.
+#
+# Optional repo secrets for release signing (otherwise a throwaway debug key is used):
+#   ANDROID_KEYSTORE_BASE64   base64 of your .jks/.keystore file
+#   ANDROID_KEYSTORE_PASSWORD keystore password
+#   ANDROID_KEY_ALIAS         key alias
+#   ANDROID_KEY_PASSWORD      key password (defaults to keystore password)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  ANDROID_NDK_VERSION: "29.0.14206865"
+  ANDROID_BUILD_TOOLS: "36.1.0"
+  CMAKE_PRESET: x-android-ci-arm64
+  RUST_TARGET: aarch64-linux-android
+  ABI: arm64-v8a
+
+jobs:
+  build-apk:
+    name: Build signed APK (arm64-v8a)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # only needed for the tag release step
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install ninja-build
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platforms;android-36" \
+                     "build-tools;${ANDROID_BUILD_TOOLS}" \
+                     "ndk;${ANDROID_NDK_VERSION}"
+
+      - name: Install Rust Android target
+        run: |
+          rustup toolchain install stable
+          rustup target add ${RUST_TARGET}
+
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-home-cache-cleanup: true
+
+      - name: Configure CMake
+        run: cmake --preset ${CMAKE_PRESET}
+
+      - name: Build native library and bundled mods
+        run: |
+          cmake --build --preset ${CMAKE_PRESET} --target dusklight
+          cmake --build --preset ${CMAKE_PRESET} --target dusklight_mods
+
+      - name: Build unsigned APK
+        working-directory: platforms/android
+        run: ./gradlew :app:assembleRelease --rerun-tasks
+
+      - name: Prepare signing key
+        id: key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          KS="$RUNNER_TEMP/signing.jks"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$KS"
+            ALIAS="$KEY_ALIAS"
+            SPASS="$KEYSTORE_PASS"
+            KPASS="${KEY_PASS:-$KEYSTORE_PASS}"
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No keystore secrets found; signing with a throwaway debug key."
+            ALIAS=dusklight-debug
+            SPASS=android
+            KPASS=android
+            keytool -genkeypair -keystore "$KS" -storepass "$SPASS" -keypass "$KPASS" \
+              -alias "$ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Dusklight Debug, O=Dusklight, C=US"
+            echo "mode=debug" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "KS=$KS"
+            echo "KS_ALIAS=$ALIAS"
+            echo "KS_PASS=$SPASS"
+            echo "KEY_PASS=$KPASS"
+          } >> "$GITHUB_ENV"
+
+      - name: Align and sign APK
+        run: |
+          BT="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}"
+          IN="platforms/android/app/build/outputs/apk/release/app-${ABI}-release-unsigned.apk"
+          OUT_DIR=upload
+          OUT="$OUT_DIR/dusklight-android-${ABI}.apk"
+          mkdir -p "$OUT_DIR"
+
+          "$BT/zipalign" -f -p 4 "$IN" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign \
+            --ks "$KS" --ks-key-alias "$KS_ALIAS" \
+            --ks-pass env:KS_PASS --key-pass env:KEY_PASS \
+            --out "$OUT" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" verify --verbose "$OUT"
+
+          rm -f "$KS"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: dusklight-${{ env.APP_VERSION || github.sha }}-android-arm64
+          path: upload/*.apk
+          if-no-files-found: error
+
+      - name: Attach APK to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v') && steps.key.outputs.mode == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: upload/*.apk
