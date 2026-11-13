@@ -1,0 +1,895 @@
+diff -ruN dusklight-orig/files.cmake dusklight-main/files.cmake
+--- dusklight-orig/files.cmake	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/files.cmake	2026-11-12 05:25:36.988530489 +0000
+@@ -1670,6 +1670,7 @@
+         src/dusk/ui/touch_controls_common.hpp
+         src/dusk/ui/touch_controls_editor.cpp
+         src/dusk/ui/touch_controls_editor.hpp
++        src/dusk/ui/touch_stick.hpp
+         src/dusk/ui/ui.cpp
+         src/dusk/ui/ui.hpp
+         src/dusk/ui/warp.cpp
+diff -ruN dusklight-orig/res/rml/touch_controls.rcss dusklight-main/res/rml/touch_controls.rcss
+--- dusklight-orig/res/rml/touch_controls.rcss	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/res/rml/touch_controls.rcss	2026-11-12 05:26:32.947743441 +0000
+@@ -317,6 +317,7 @@
+     border-color: rgba(var(--color-white-rgb), 20%);
+     opacity: 0;
+     pointer-events: none;
++    transform-origin: center;
+     transition: opacity 0.18s linear-in-out;
+ }
+ 
+@@ -324,6 +325,20 @@
+     opacity: 1;
+ }
+ 
++/* A locked stick is always on screen, dimmed until it is touched. */
++touch-stick.locked {
++    opacity: 0.55;
++}
++
++touch-stick.locked.active {
++    opacity: 1;
++}
++
++touch-stick:hidden,
++touch-stick.active:hidden {
++    opacity: 0;
++}
++
+ stick-ring {
+     position: absolute;
+     left: 18dp;
+@@ -337,6 +352,8 @@
+ 
+ stick-knob {
+     position: absolute;
++    left: 38dp;
++    top: 38dp;
+     width: 48dp;
+     height: 48dp;
+     border-radius: 24dp;
+diff -ruN dusklight-orig/res/rml/touch_controls_editor.rcss dusklight-main/res/rml/touch_controls_editor.rcss
+--- dusklight-orig/res/rml/touch_controls_editor.rcss	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/res/rml/touch_controls_editor.rcss	2026-11-12 05:26:32.948379784 +0000
+@@ -54,6 +54,11 @@
+     pointer-events: auto;
+ }
+ 
++/* Aspect-locked controls (the joystick) only resize from the corners. */
++selection-frame.uniform resize-handle.edge {
++    display: none;
++}
++
+ resize-handle.left {
+     left: -12dp;
+ }
+diff -ruN dusklight-orig/src/dusk/settings.cpp dusklight-main/src/dusk/settings.cpp
+--- dusklight-orig/src/dusk/settings.cpp	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/src/dusk/settings.cpp	2026-11-12 05:25:36.987549013 +0000
+@@ -113,6 +113,7 @@
+         .touchTargeting {"game.touchTargeting", TouchTargeting::Hybrid},
+         .enableMenuPointer {"game.enableMenuPointer", true},
+         .touchControlsLayout {"game.touchControlsLayout", ui::ControlLayout{}},
++        .touchStickLocked {"game.touchStickLocked", false},
+         .invertCameraXAxis {"game.invertCameraXAxis", false},
+         .invertCameraYAxis {"game.invertCameraYAxis", false},
+         .invertFirstPersonXAxis {"game.invertFirstPersonXAxis", false},
+@@ -388,6 +389,7 @@
+     Register(g_userSettings.game.touchTargeting);
+     Register(g_userSettings.game.enableMenuPointer);
+     Register(g_userSettings.game.touchControlsLayout);
++    Register(g_userSettings.game.touchStickLocked);
+     Register(g_userSettings.game.debugFlyCam);
+     Register(g_userSettings.game.debugFlyCamLockEvents);
+     Register(g_userSettings.game.allowBackgroundInput);
+diff -ruN dusklight-orig/src/dusk/settings.h dusklight-main/src/dusk/settings.h
+--- dusklight-orig/src/dusk/settings.h	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/src/dusk/settings.h	2026-11-12 05:25:36.986621829 +0000
+@@ -278,6 +278,7 @@
+         ConfigVar<TouchTargeting> touchTargeting;
+         ConfigVar<bool> enableMenuPointer;
+         ConfigVar<ui::ControlLayout> touchControlsLayout;
++        ConfigVar<bool> touchStickLocked;
+         ConfigVar<bool> invertCameraXAxis;
+         ConfigVar<bool> invertCameraYAxis;
+         ConfigVar<bool> invertFirstPersonXAxis;
+diff -ruN dusklight-orig/src/dusk/ui/controls.hpp dusklight-main/src/dusk/ui/controls.hpp
+--- dusklight-orig/src/dusk/ui/controls.hpp	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/src/dusk/ui/controls.hpp	2026-11-12 05:22:20.836793106 +0000
+@@ -1,6 +1,9 @@
+ #pragma once
+ 
++#include <array>
+ #include <map>
++#include <string>
++#include <string_view>
+ 
+ namespace dusk::ui {
+ 
+@@ -82,7 +85,10 @@
+     bool operator==(const ControlLayout&) const = default;
+ };
+ 
+-constexpr std::array<std::string_view, 9> kControlLayoutIds = {
++// Layout id of the movement joystick. Only its position (when locked) and scale are customizable.
++constexpr std::string_view kStickLayoutId = "stick";
++
++constexpr std::array<std::string_view, 10> kControlLayoutIds = {
+     "actionBar",
+     "buttonA",
+     "buttonB",
+@@ -90,6 +96,7 @@
+     "buttonY",
+     "buttonZ",
+     "skip",
++    kStickLayoutId,
+     "triggerL",
+     "triggerR",
+ };
+diff -ruN dusklight-orig/src/dusk/ui/settings.cpp dusklight-main/src/dusk/ui/settings.cpp
+--- dusklight-orig/src/dusk/ui/settings.cpp	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/src/dusk/ui/settings.cpp	2026-11-12 05:26:02.931466639 +0000
+@@ -964,6 +964,31 @@
+                 pane.clear();
+                 pane.add_text("Open the touch controls layout editor.");
+             });
++        addOption("Lock Joystick", getSettings().game.touchStickLocked,
++            "Keeps the joystick fixed on screen instead of appearing under your thumb.<br/><br/>"
++            "Place it with Customize Layout. When off, the joystick appears wherever you touch the "
++            "left side of the screen.",
++            [] { return !getSettings().game.enableTouchControls; });
++        auto& joystickSize = leftPane.add_child<NumberButton>(NumberButton::Props{
++            .key = "Joystick Size",
++            .getValue = [] { return touch_stick_size_percent(); },
++            .setValue =
++                [](int value) {
++                    set_touch_stick_size_percent(value);
++                    config::save();
++                },
++            .isDisabled = [] { return !getSettings().game.enableTouchControls; },
++            .isModified = [] { return touch_stick_size_percent() != 100; },
++            .min = 50,
++            .max = 200,
++            .step = 5,
++            .suffix = "%",
++        });
++        leftPane.register_control(joystickSize, rightPane, [](Pane& pane) {
++            pane.clear();
++            pane.add_rml("Adjusts the size of the joystick, from 50% to 200%.<br/><br/>You can "
++                         "also resize it by dragging its corner in Customize Layout.");
++        });
+         leftPane.register_control(
+             leftPane.add_select_button({
+                 .key = "Touch Targeting",
+diff -ruN dusklight-orig/src/dusk/ui/touch_controls.cpp dusklight-main/src/dusk/ui/touch_controls.cpp
+--- dusklight-orig/src/dusk/ui/touch_controls.cpp	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/src/dusk/ui/touch_controls.cpp	2026-11-12 05:25:31.098909558 +0000
+@@ -30,8 +30,6 @@
+ namespace {
+ 
+ constexpr u32 kPort = PAD_CHAN0;
+-constexpr float kStickRadiusDp = 62.f;
+-constexpr float kStickKnobRadiusDp = 24.f;
+ constexpr float kAnalogZoneTopDp = 92.f;
+ constexpr float kAnalogZoneBottomDp = 30.f;
+ constexpr float kLeftZoneWidth = 0.46f;
+@@ -137,10 +135,6 @@
+     <link type="text/rcss" href="res/rml/touch_controls.rcss" />
+ </head>
+ <body id="root">
+-    <touch-stick id="control-stick">
+-        <stick-ring />
+-        <stick-knob id="control-knob" />
+-    </touch-stick>
+ )RML"} + Rml::String{fragment.data(), fragment.size()} +
+            Rml::String{R"RML(
+ </body>
+@@ -178,6 +172,10 @@
+     CStick,
+ };
+ 
++bool stick_locked() noexcept {
++    return getSettings().game.touchStickLocked.getValue();
++}
++
+ StickOutput stick_output_mode() noexcept {
+     if (fishing_controls_active() || hawkeye_active()) {
+         return StickOutput::CStick;
+@@ -207,14 +205,6 @@
+     return true;
+ }
+ 
+-Rml::Vector2f clamped_stick_delta(
+-    Rml::Vector2f start, Rml::Vector2f current, float stickRadius) noexcept {
+-    Rml::Vector2f delta = current - start;
+-    const float length = std::sqrt(delta.x * delta.x + delta.y * delta.y);
+-    delta *= length > stickRadius ? stickRadius / length : 1.f;
+-    return delta;
+-}
+-
+ struct FaceButtonState {
+     std::string iconSource;
+     uint64_t iconRevision = 0;
+@@ -691,6 +681,111 @@
+     if (mControlStick != nullptr) {
+         mControlStick->SetClass("active", false);
+     }
++    apply_stick_knob_offset(Rml::Vector2f{0.f, 0.f});
++}
++
++void TouchControls::begin_move_touch(
++    SDL_FingerID id, Rml::Vector2f position, bool anchored) noexcept {
++    mMoveTouch = {
++        .id = id,
++        .start = position,
++        .current = position,
++        .active = true,
++        .anchored = anchored,
++    };
++}
++
++std::optional<stick::Vec2> TouchControls::stick_center_px() const noexcept {
++    if (!mStickLayout.visualRect) {
++        return std::nullopt;
++    }
++    const auto& rect = *mStickLayout.visualRect;
++    const float dpScale = touch_dp_scale();
++    return stick::Vec2{(rect.l + rect.w * 0.5f) * dpScale, (rect.t + rect.h * 0.5f) * dpScale};
++}
++
++std::optional<stick::Vec2> TouchControls::stick_origin_px(const StickTouch& touch) const noexcept {
++    if (touch.anchored) {
++        return stick_center_px();
++    }
++    return stick::Vec2{touch.start.x, touch.start.y};
++}
++
++bool TouchControls::touch_grabs_locked_stick(Rml::Vector2f position) const noexcept {
++    const auto center = stick_center_px();
++    if (!center) {
++        return false;
++    }
++    const float radius = stick::radius_px(mStickLayout.layoutScale, touch_dp_scale());
++    return stick::within_grab_area({position.x, position.y}, *center, radius);
++}
++
++void TouchControls::sync_stick_layout(const ResolvedControlLayout& layout) noexcept {
++    mStickLayout.visualRect = layout.visual;
++    mStickLayout.layoutScale = layout.scale;
++    apply_control_transform_if_changed(mControlStick, mStickLayout.appliedTransform, layout.scale);
++    // A floating stick positions itself under the finger (see sync_stick_visual); only a locked
++    // stick follows the saved layout.
++    if (stick_locked()) {
++        apply_control_box_if_changed(mControlStick, mStickLayout.appliedBox, layout.box);
++    }
++}
++
++void TouchControls::sync_stick_visual() noexcept {
++    if (mControlStick == nullptr || mControlKnob == nullptr) {
++        return;
++    }
++
++    mControlStick->SetClass("locked", stick_locked());
++
++    Rml::Vector2f knobOffset{0.f, 0.f};
++    bool active = false;
++    if (mMoveTouch.active) {
++        if (const auto origin = stick_origin_px(mMoveTouch)) {
++            const float dpScale = touch_dp_scale();
++            const float scale = mStickLayout.layoutScale;
++            const auto delta = stick::clamped_delta(
++                *origin, {mMoveTouch.current.x, mMoveTouch.current.y},
++                stick::radius_px(scale, dpScale));
++            const auto offset = stick::knob_offset_dp(delta, dpScale, scale);
++            knobOffset = Rml::Vector2f{offset.x, offset.y};
++            active = true;
++            if (!mMoveTouch.anchored) {
++                // Floating stick: centre the ring under the finger that started it.
++                apply_control_box_if_changed(mControlStick, mStickLayout.appliedBox,
++                    {
++                        .l = mMoveTouch.start.x / dpScale - stick::kBaseRadiusDp,
++                        .t = mMoveTouch.start.y / dpScale - stick::kBaseRadiusDp,
++                        .w = stick::kBaseSizeDp,
++                        .h = stick::kBaseSizeDp,
++                    });
++            }
++        }
++    }
++    mControlStick->SetClass("active", active);
++    apply_stick_knob_offset(knobOffset);
++}
++
++void TouchControls::apply_stick_knob_offset(Rml::Vector2f offsetDp) noexcept {
++    if (mControlKnob == nullptr ||
++        (mAppliedKnobOffset && control_float_near(mAppliedKnobOffset->x, offsetDp.x) &&
++            control_float_near(mAppliedKnobOffset->y, offsetDp.y)))
++    {
++        return;
++    }
++
++    constexpr float kCentre = stick::kBaseRadiusDp - stick::kKnobRadiusDp;
++    mControlKnob->SetProperty(
++        Rml::PropertyId::Left, Rml::Property(kCentre + offsetDp.x, Rml::Unit::DP));
++    mControlKnob->SetProperty(
++        Rml::PropertyId::Top, Rml::Property(kCentre + offsetDp.y, Rml::Unit::DP));
++    mAppliedKnobOffset = offsetDp;
++}
++
++void TouchControls::set_stick_hidden(bool hidden) noexcept {
++    if (mControlStick != nullptr) {
++        mControlStick->SetPseudoClass("hidden", hidden);
++    }
+ }
+ 
+ void TouchControls::clear_control_input() noexcept {
+@@ -741,30 +836,12 @@
+         if (!mCameraTouch.active) {
+             mCameraTouch = mMoveTouch;
+             mCameraTouch.start = mMoveTouch.current;
++            mCameraTouch.anchored = false;
+         }
+         mMoveTouch = {};
+     }
+ 
+-    const float stickRadius = kStickRadiusDp * touch_dp_scale();
+-    if (mControlStick != nullptr) {
+-        if (mMoveTouch.active && stickRadius > 0.f) {
+-            const auto delta =
+-                clamped_stick_delta(mMoveTouch.start, mMoveTouch.current, stickRadius);
+-            const float knobRadius = kStickKnobRadiusDp * touch_dp_scale();
+-            mControlStick->SetClass("active", true);
+-            mControlStick->SetProperty(Rml::PropertyId::Left,
+-                Rml::Property(mMoveTouch.start.x - stickRadius, Rml::Unit::PX));
+-            mControlStick->SetProperty(Rml::PropertyId::Top,
+-                Rml::Property(mMoveTouch.start.y - stickRadius, Rml::Unit::PX));
+-            mControlKnob->SetProperty(Rml::PropertyId::Left,
+-                Rml::Property(stickRadius + delta.x - knobRadius, Rml::Unit::PX));
+-            mControlKnob->SetProperty(Rml::PropertyId::Top,
+-                Rml::Property(stickRadius + delta.y - knobRadius, Rml::Unit::PX));
+-        } else {
+-            mControlStick->SetClass("active", false);
+-        }
+-    }
+-
++    sync_stick_visual();
+     sync_visual_state();
+ }
+ 
+@@ -787,21 +864,25 @@
+         status.triggerRight = kTriggerAnalog;
+     }
+ 
+-    const float stickRadius = kStickRadiusDp * touch_dp_scale();
+-    if (mMoveTouch.active && stickRadius > 0.f) {
+-        const auto delta = clamped_stick_delta(mMoveTouch.start, mMoveTouch.current, stickRadius);
+-        const float stickX = stick_value(delta.x / stickRadius);
+-        const float stickY = stick_value(-delta.y / stickRadius);
+-        switch (stick_output_mode()) {
+-        case StickOutput::CStick:
+-            status.substickX = stickX;
+-            status.substickY = stickY;
+-            break;
+-        case StickOutput::MainStick:
+-        default:
+-            status.stickX = stickX;
+-            status.stickY = stickY;
+-            break;
++    if (mMoveTouch.active) {
++        if (const auto origin = stick_origin_px(mMoveTouch)) {
++            const float radius = stick::radius_px(mStickLayout.layoutScale, touch_dp_scale());
++            const auto delta = stick::clamped_delta(
++                *origin, {mMoveTouch.current.x, mMoveTouch.current.y}, radius);
++            const auto axes = stick::axes(delta, radius);
++            const s8 stickX = stick_value(axes.x);
++            const s8 stickY = stick_value(axes.y);
++            switch (stick_output_mode()) {
++            case StickOutput::CStick:
++                status.substickX = stickX;
++                status.substickY = stickY;
++                break;
++            case StickOutput::MainStick:
++            default:
++                status.stickX = stickX;
++                status.stickY = stickY;
++                break;
++            }
+         }
+     }
+ 
+@@ -868,7 +949,12 @@
+             props = iter->second;
+         }
+ 
+-        const auto layout = resolve_control_layout(props, docSize);
++        const auto layout =
++            resolve_control_layout(sanitize_touch_control_props(info, props), docSize);
++        if (is_stick_layout_control(info)) {
++            sync_stick_layout(layout);
++            continue;
++        }
+         if (info.hasControl) {
+             const auto index = static_cast<size_t>(info.control);
+             if (index >= mControlElements.size()) {
+@@ -898,6 +984,7 @@
+ void TouchControls::sync_visual_state() noexcept {
+     if (mWasSuppressed || !getSettings().game.enableTouchControls) {
+         clear_motion_touch_input();
++        set_stick_hidden(true);
+         for (const auto control : {Control::L, Control::R}) {
+             const auto& elements = mControlElements[static_cast<size_t>(control)];
+             if (elements.root != nullptr) {
+@@ -909,6 +996,11 @@
+     }
+ 
+     const bool hideGameplayControls = game_controls_suppressed();
++    // A locked stick stays on screen, so tuck it away with the other gameplay controls and while
++    // aiming (when the left side of the screen drives the camera instead of movement). A floating
++    // stick only exists while touched and is never hidden.
++    set_stick_hidden(stick_locked() &&
++                     (hideGameplayControls || (dCamera_c::isAimActive() && !hawkeye_active())));
+     const auto& lTrigger = mControlElements[static_cast<size_t>(Control::L)];
+     const auto& rTrigger = mControlElements[static_cast<size_t>(Control::R)];
+     const bool lHidden = hideGameplayControls && !control_override_active(Control::L);
+@@ -1259,15 +1351,16 @@
+     const auto width = static_cast<float>(dimensions.x);
+     const bool inAnalogZone = position.y >= top && position.y <= bottom;
+     const bool inLeftZone = position.x < width * kLeftZoneWidth;
++
++    // A floating stick appears under any touch in the left analog zone. A locked stick is only
++    // grabbed by touching it, wherever the player placed it.
++    const bool locked = stick_locked();
++    const bool grabsStick =
++        locked ? touch_grabs_locked_stick(position) : (inAnalogZone && inLeftZone);
+     if (dCamera_c::isAimActive()) {
+-        if (hawkeye_active() && inAnalogZone && inLeftZone) {
++        if (hawkeye_active() && grabsStick) {
+             if (!mMoveTouch.active) {
+-                mMoveTouch = {
+-                    .id = id,
+-                    .start = position,
+-                    .current = position,
+-                    .active = true,
+-                };
++                begin_move_touch(id, position, locked);
+             }
+             return;
+         }
+@@ -1283,18 +1376,9 @@
+         return;
+     }
+ 
+-    if (!inAnalogZone) {
+-        return;
+-    }
+-
+-    if (!mMoveTouch.active && inLeftZone) {
+-        mMoveTouch = {
+-            .id = id,
+-            .start = position,
+-            .current = position,
+-            .active = true,
+-        };
+-    } else if (!mCameraTouch.active && position.x > width * kRightZoneStart) {
++    if (!mMoveTouch.active && grabsStick) {
++        begin_move_touch(id, position, locked);
++    } else if (inAnalogZone && !mCameraTouch.active && position.x > width * kRightZoneStart) {
+         mCameraTouch = {
+             .id = id,
+             .start = position,
+diff -ruN dusklight-orig/src/dusk/ui/touch_controls.hpp dusklight-main/src/dusk/ui/touch_controls.hpp
+--- dusklight-orig/src/dusk/ui/touch_controls.hpp	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/src/dusk/ui/touch_controls.hpp	2026-11-12 05:25:31.097912495 +0000
+@@ -6,6 +6,7 @@
+ #include "dusk/action_bindings.h"
+ #include "dusk/menu_pointer.h"
+ #include "dusk/ui/controls.hpp"
++#include "touch_stick.hpp"
+ 
+ #include <array>
+ #include <bitset>
+@@ -41,6 +42,8 @@
+         Rml::Vector2f start;
+         Rml::Vector2f current;
+         bool active = false;
++        // Locked stick: output is measured from the stick's fixed centre instead of `start`.
++        bool anchored = false;
+     };
+     struct ControlTouch {
+         SDL_FingerID id = 0;
+@@ -75,6 +78,14 @@
+     void set_control_visual(Control control, bool pressed) noexcept;
+     void sync_l_lock_state() noexcept;
+     void clear_motion_touch_input() noexcept;
++    void begin_move_touch(SDL_FingerID id, Rml::Vector2f position, bool anchored) noexcept;
++    std::optional<stick::Vec2> stick_center_px() const noexcept;
++    std::optional<stick::Vec2> stick_origin_px(const StickTouch& touch) const noexcept;
++    bool touch_grabs_locked_stick(Rml::Vector2f position) const noexcept;
++    void sync_stick_layout(const ResolvedControlLayout& layout) noexcept;
++    void sync_stick_visual() noexcept;
++    void apply_stick_knob_offset(Rml::Vector2f offsetDp) noexcept;
++    void set_stick_hidden(bool hidden) noexcept;
+     void clear_control_input() noexcept;
+     void clear_virtual_input() noexcept;
+     void sync_touch_state() noexcept;
+@@ -116,6 +127,8 @@
+     std::array<bool, static_cast<size_t>(Control::COUNT)> mControlVisualPressed{};
+     std::bitset<static_cast<size_t>(ActionBinds::COUNT)> mQueuedActions;
+     LayoutState mActionBarLayout;
++    LayoutState mStickLayout;
++    std::optional<Rml::Vector2f> mAppliedKnobOffset;
+     Insets mSafeInsets;
+     u16 mButtonMask = 0;
+     bool mLPressed = false;
+diff -ruN dusklight-orig/src/dusk/ui/touch_controls_common.cpp dusklight-main/src/dusk/ui/touch_controls_common.cpp
+--- dusklight-orig/src/dusk/ui/touch_controls_common.cpp	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/src/dusk/ui/touch_controls_common.cpp	2026-11-13 03:08:39.110984111 +0000
+@@ -1,5 +1,9 @@
+ #include "touch_controls_common.hpp"
+ 
++#include "touch_stick.hpp"
++
++#include "dusk/settings.h"
++
+ #include <aurora/rmlui.hpp>
+ 
+ #include <algorithm>
+@@ -143,9 +147,27 @@
+         .control = Control::A,
+         .hasControl = true,
+     },
++    {
++        .layoutId = "stick",
++        .elementId = "control-stick",
++        .props =
++            {
++                .x = 56.f,
++                .y = 64.f,
++                .w = stick::kBaseSizeDp,
++                .h = stick::kBaseSizeDp,
++                .scale = 1.f,
++                .anchor = ControlAnchor::BottomLeft,
++            },
++        .uniform = true,
++    },
+ }};
+ 
+ constexpr std::string_view kTouchControlsRmlFragment = R"RML(
++    <touch-stick id="control-stick" class="control stick">
++        <stick-ring />
++        <stick-knob id="control-knob" />
++    </touch-stick>
+     <button id="trigger-l" class="control trigger trigger-l"><span>L</span></button>
+     <action-bar id="action-bar" class="control">
+         <button id="items" class="utility items"><icon><glyph>&#xeb0e;</glyph></icon></button>
+@@ -195,6 +217,73 @@
+     return nullptr;
+ }
+ 
++ControlProps sanitize_touch_control_props(
++    const TouchLayoutControlInfo& info, ControlProps props) noexcept {
++    if (info.uniform) {
++        props.w = stick::kBaseSizeDp;
++        props.h = stick::kBaseSizeDp;
++        props.scale = stick::clamp_scale(props.scale);
++    }
++    return props;
++}
++
++namespace {
++
++// Saved props for the joystick (or its default), already sanitized.
++ControlProps stick_props(const ControlLayout& layout, const TouchLayoutControlInfo& info) {
++    ControlProps props = info.props;
++    if (const auto iter = layout.controls.find(info.layoutId); iter != layout.controls.end()) {
++        props = iter->second;
++    }
++    return sanitize_touch_control_props(info, props);
++}
++
++}  // namespace
++
++int touch_stick_size_percent() noexcept {
++    const auto* info = find_touch_layout_control(kStickLayoutId);
++    if (info == nullptr) {
++        return 100;
++    }
++    const auto props = stick_props(getSettings().game.touchControlsLayout.getValue(), *info);
++    return static_cast<int>(std::lround(props.scale * 100.f));
++}
++
++void set_touch_stick_size_percent(int percent) {
++    const auto* info = find_touch_layout_control(kStickLayoutId);
++    if (info == nullptr) {
++        return;
++    }
++
++    auto& var = getSettings().game.touchControlsLayout;
++    auto layout = var.getValue();
++    const auto oldProps = stick_props(layout, *info);
++    auto props = oldProps;
++    props.scale = stick::clamp_scale(static_cast<float>(percent) / 100.f);
++
++    // Resize around the stick's centre (like pinching it) and keep it on screen. The position is
++    // re-encoded the same way the layout editor does, so it stays right on any screen size.
++    const auto docSize = touch_document_size_dp(aurora::rmlui::get_context());
++    if (docSize.w > 0.f && docSize.h > 0.f) {
++        const auto before = resolve_control_layout(oldProps, docSize).visual;
++        const float size = props.w * props.scale;
++        ControlRect visual{
++            .l = before.l + (before.w - size) * 0.5f,
++            .t = before.t + (before.h - size) * 0.5f,
++            .w = size,
++            .h = size,
++        };
++        visual.l = std::clamp(visual.l, 0.f, std::max(0.f, docSize.w - visual.w));
++        visual.t = std::clamp(visual.t, 0.f, std::max(0.f, docSize.h - visual.h));
++        props = encode_control_props(
++            visual, docSize, props, touch_control_dock_anchor(visual, docSize));
++    }
++
++    layout.version = ControlLayout::Version;
++    layout.controls[std::string{info->layoutId}] = props;
++    var.setValue(std::move(layout));
++}
++
+ SDL_FingerID touch_event_id(const Rml::Event& event) noexcept {
+     return event.GetParameter<SDL_FingerID>("finger_id", 0);
+ }
+diff -ruN dusklight-orig/src/dusk/ui/touch_controls_common.hpp dusklight-main/src/dusk/ui/touch_controls_common.hpp
+--- dusklight-orig/src/dusk/ui/touch_controls_common.hpp	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/src/dusk/ui/touch_controls_common.hpp	2026-11-12 05:26:02.929525837 +0000
+@@ -12,7 +12,7 @@
+ 
+ namespace dusk::ui {
+ 
+-constexpr size_t kTouchLayoutControlCount = 9;
++constexpr size_t kTouchLayoutControlCount = 10;
+ 
+ struct TouchLayoutControlInfo {
+     std::string_view layoutId;
+@@ -20,6 +20,8 @@
+     ControlProps props;
+     Control control = Control::COUNT;
+     bool hasControl = false;
++    // Scales uniformly and always keeps its design size, so only `scale` is user-editable.
++    bool uniform = false;
+ };
+ 
+ std::string_view touch_controls_rml_fragment() noexcept;
+@@ -27,6 +29,20 @@
+ const TouchLayoutControlInfo* find_touch_layout_control(std::string_view layoutId) noexcept;
+ const TouchLayoutControlInfo* find_touch_layout_control(Control control) noexcept;
+ 
++inline bool is_stick_layout_control(const TouchLayoutControlInfo& info) noexcept {
++    return info.layoutId == kStickLayoutId;
++}
++
++// Normalizes props loaded from user config for the given control (e.g. keeps the joystick round
++// and its scale within range). Controls without special rules are returned unchanged.
++ControlProps sanitize_touch_control_props(
++    const TouchLayoutControlInfo& info, ControlProps props) noexcept;
++
++// The joystick's size as a percentage of its default (50-200), stored in the saved touch layout so
++// the settings slider and the layout editor always agree.
++int touch_stick_size_percent() noexcept;
++void set_touch_stick_size_percent(int percent);
++
+ SDL_FingerID touch_event_id(const Rml::Event& event) noexcept;
+ Rml::Vector2f touch_event_position(const Rml::Event& event) noexcept;
+ Rml::Vector2f mouse_event_position(const Rml::Event& event) noexcept;
+diff -ruN dusklight-orig/src/dusk/ui/touch_controls_editor.cpp dusklight-main/src/dusk/ui/touch_controls_editor.cpp
+--- dusklight-orig/src/dusk/ui/touch_controls_editor.cpp	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/src/dusk/ui/touch_controls_editor.cpp	2026-11-13 03:12:45.254691945 +0000
+@@ -1,6 +1,7 @@
+ #include "touch_controls_editor.hpp"
+ 
+ #include "modal.hpp"
++#include "touch_stick.hpp"
+ 
+ #include "Z2AudioLib/Z2SeMgr.h"
+ #include "dusk/config.hpp"
+@@ -11,6 +12,7 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <limits>
+ #include <memory>
+ #include <string>
+ 
+@@ -309,6 +311,8 @@
+     }
+ 
+     mSelectionFrame->SetClass("visible", hasSelection);
++    mSelectionFrame->SetClass(
++        "uniform", hasSelection && touch_layout_controls()[mSelectedIndex].uniform);
+     for (size_t i = 0; i < mElements.size(); ++i) {
+         if (mElements[i].root != nullptr) {
+             mElements[i].root->SetClass("editor-selected", hasSelection && i == mSelectedIndex);
+@@ -347,7 +351,7 @@
+     if (const auto iter = mWorkingLayout.controls.find(info.layoutId);
+         iter != mWorkingLayout.controls.end())
+     {
+-        return iter->second;
++        return sanitize_touch_control_props(info, iter->second);
+     }
+     return info.props;
+ }
+@@ -367,6 +371,7 @@
+     props.w = std::max(props.w, 1.f);
+     props.h = std::max(props.h, 1.f);
+     props.scale = std::max(props.scale, kMinScale);
++    props = sanitize_touch_control_props(touch_layout_controls()[index], props);
+     props = encode_control_props(visual, docSize, props, touch_control_dock_anchor(visual, docSize));
+     mWorkingLayout.version = ControlLayout::Version;
+     mWorkingLayout.controls[std::string{touch_layout_controls()[index].layoutId}] = props;
+@@ -396,6 +401,13 @@
+     if (!control_valid(index) || mPointerEdit.active) {
+         return false;
+     }
++    // Aspect-locked controls (the joystick) resize from the corners only. The edge handles are
++    // hidden for them; this also keeps a stray edge drag from distorting one.
++    if (touch_layout_controls()[index].uniform &&
++        (is_horizontal_edge(handle) || is_vertical_edge(handle)))
++    {
++        return false;
++    }
+ 
+     auto* context = mDocument != nullptr ? mDocument->GetContext() : nullptr;
+     const auto docSize = touch_document_size_dp(context);
+@@ -527,9 +539,12 @@
+             minSize.y / std::max(edit.startVisual.h, 1.f));
+     const float maxW = left ? fixed.x : docSize.w - fixed.x;
+     const float maxH = top ? fixed.y : docSize.h - fixed.y;
+-    const float maxRatio =
+-        std::max(minRatio, std::min(maxW / std::max(edit.startVisual.w, 1.f),
+-                                maxH / std::max(edit.startVisual.h, 1.f)));
++    const auto maxSize = max_visual_size(edit.index);
++    const float maxRatio = std::max(minRatio,
++        std::min({maxW / std::max(edit.startVisual.w, 1.f),
++            maxH / std::max(edit.startVisual.h, 1.f),
++            maxSize.x / std::max(edit.startVisual.w, 1.f),
++            maxSize.y / std::max(edit.startVisual.h, 1.f)}));
+     const float ratio =
+         std::clamp(std::max(desiredW / std::max(edit.startVisual.w, 1.f),
+                        desiredH / std::max(edit.startVisual.h, 1.f)),
+@@ -553,8 +568,11 @@
+     const auto minSize = min_visual_size(index);
+     const float minW = std::min(minSize.x, docSize.w);
+     const float minH = std::min(minSize.y, docSize.h);
+-    rect.w = std::clamp(rect.w, minW, docSize.w);
+-    rect.h = std::clamp(rect.h, minH, docSize.h);
++    const auto maxSize = max_visual_size(index);
++    const float maxW = std::max(minW, std::min(docSize.w, maxSize.x));
++    const float maxH = std::max(minH, std::min(docSize.h, maxSize.y));
++    rect.w = std::clamp(rect.w, minW, maxW);
++    rect.h = std::clamp(rect.h, minH, maxH);
+     rect.l = std::clamp(rect.l, 0.f, std::max(0.f, docSize.w - rect.w));
+     rect.t = std::clamp(rect.t, 0.f, std::max(0.f, docSize.h - rect.h));
+     return rect;
+@@ -566,6 +584,10 @@
+     }
+ 
+     const auto id = touch_layout_controls()[index].layoutId;
++    if (id == kStickLayoutId) {
++        const float size = stick::kBaseSizeDp * stick::kMinScale;
++        return {size, size};
++    }
+     if (id == "actionBar") {
+         return {kMinActionBarWidthDp, kMinActionBarHeightDp};
+     }
+@@ -575,6 +597,15 @@
+     return {kMinControlDp, kMinControlDp};
+ }
+ 
++Rml::Vector2f TouchControlsEditor::max_visual_size(size_t index) const noexcept {
++    if (control_valid(index) && is_stick_layout_control(touch_layout_controls()[index])) {
++        const float size = stick::kBaseSizeDp * stick::kMaxScale;
++        return {size, size};
++    }
++    constexpr float kUnbounded = std::numeric_limits<float>::max();
++    return {kUnbounded, kUnbounded};
++}
++
+ bool TouchControlsEditor::handle_nav_command(Rml::Event& event, NavCommand cmd) {
+     if (cmd == NavCommand::Cancel || cmd == NavCommand::Menu) {
+         cancel_edit();
+diff -ruN dusklight-orig/src/dusk/ui/touch_controls_editor.hpp dusklight-main/src/dusk/ui/touch_controls_editor.hpp
+--- dusklight-orig/src/dusk/ui/touch_controls_editor.hpp	2026-10-20 11:30:29.000000000 +0000
++++ dusklight-main/src/dusk/ui/touch_controls_editor.hpp	2026-11-12 05:26:17.021463105 +0000
+@@ -77,6 +77,7 @@
+     ControlRect rect_for_edit(Rml::Vector2f pointerDp, ControlProps& props) const noexcept;
+     ControlRect clamp_visual_rect(size_t index, ControlRect rect) const noexcept;
+     Rml::Vector2f min_visual_size(size_t index) const noexcept;
++    Rml::Vector2f max_visual_size(size_t index) const noexcept;
+     bool handle_nav_command(Rml::Event& event, NavCommand cmd) override;
+     void save_layout();
+     void request_reset();
+diff -ruN dusklight-orig/src/dusk/ui/touch_stick.hpp dusklight-main/src/dusk/ui/touch_stick.hpp
+--- dusklight-orig/src/dusk/ui/touch_stick.hpp	1970-01-01 00:00:00.000000000 +0000
++++ dusklight-main/src/dusk/ui/touch_stick.hpp	2026-11-12 05:22:01.957120261 +0000
+@@ -0,0 +1,83 @@
++#pragma once
++
++#include <cmath>
++
++// Pure geometry for the on-screen touch joystick. This header deliberately has no engine, RmlUi or
++// SDL dependencies so the maths can be reasoned about (and unit tested) in isolation.
++//
++// All "Dp" values are density-independent pixels at the stick's design size. The on-screen size is
++// the design size multiplied by the user's layout scale, which is applied to the element as a CSS
++// transform, so the stick, ring and knob always scale together.
++namespace dusk::ui::stick {
++
++inline constexpr float kBaseSizeDp = 124.f;
++inline constexpr float kBaseRadiusDp = kBaseSizeDp * 0.5f;
++inline constexpr float kKnobRadiusDp = 24.f;
++
++// The layout scale the user can choose for the stick.
++inline constexpr float kMinScale = 0.5f;
++inline constexpr float kMaxScale = 2.0f;
++
++// A locked stick also accepts touches slightly outside its ring (as a multiple of its radius), so
++// it is easy to grab with a thumb without looking at it.
++inline constexpr float kLockedGrabRatio = 1.35f;
++
++struct Vec2 {
++    float x = 0.f;
++    float y = 0.f;
++};
++
++// Clamps a layout scale into the supported range. Non-finite values fall back to the default.
++constexpr float clamp_scale(float scale) noexcept {
++    if (scale != scale) {
++        return 1.f;
++    }
++    return scale < kMinScale ? kMinScale : (scale > kMaxScale ? kMaxScale : scale);
++}
++
++// Outer radius of the stick in physical pixels.
++constexpr float radius_px(float scale, float dpScale) noexcept {
++    return kBaseRadiusDp * clamp_scale(scale) * dpScale;
++}
++
++// Offset of `current` from `origin`, limited to a circle of `radius`.
++inline Vec2 clamped_delta(Vec2 origin, Vec2 current, float radius) noexcept {
++    if (!(radius > 0.f)) {
++        return {};
++    }
++    Vec2 delta{current.x - origin.x, current.y - origin.y};
++    const float length = std::sqrt(delta.x * delta.x + delta.y * delta.y);
++    if (length > radius) {
++        const float ratio = radius / length;
++        delta.x *= ratio;
++        delta.y *= ratio;
++    }
++    return delta;
++}
++
++// Whether a touch lands close enough to a locked stick to grab it.
++constexpr bool within_grab_area(Vec2 point, Vec2 center, float radius) noexcept {
++    const float dx = point.x - center.x;
++    const float dy = point.y - center.y;
++    const float grab = radius * kLockedGrabRatio;
++    return dx * dx + dy * dy <= grab * grab;
++}
++
++// Normalised pad axes in [-1, 1] for a clamped delta. Screen Y points down, pad Y points up.
++constexpr Vec2 axes(Vec2 clampedDelta, float radius) noexcept {
++    if (!(radius > 0.f)) {
++        return {};
++    }
++    return {clampedDelta.x / radius, -clampedDelta.y / radius};
++}
++
++// Knob displacement in the element's own (unscaled) dp space, given a displacement in pixels.
++constexpr Vec2 knob_offset_dp(Vec2 deltaPx, float dpScale, float scale) noexcept {
++    const float divisor = dpScale * clamp_scale(scale);
++    if (!(divisor > 0.f)) {
++        return {};
++    }
++    return {deltaPx.x / divisor, deltaPx.y / divisor};
++}
++
++}  // namespace dusk::ui::stick
