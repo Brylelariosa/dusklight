@@ -77,6 +77,7 @@ private:
     ControlRect rect_for_edit(Rml::Vector2f pointerDp, ControlProps& props) const noexcept;
     ControlRect clamp_visual_rect(size_t index, ControlRect rect) const noexcept;
     Rml::Vector2f min_visual_size(size_t index) const noexcept;
+    Rml::Vector2f max_visual_size(size_t index) const noexcept;
     bool handle_nav_command(Rml::Event& event, NavCommand cmd) override;
     void save_layout();
     void request_reset();

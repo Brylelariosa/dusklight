@@ -54,6 +54,11 @@ resize-handle {
     pointer-events: auto;
 }
 
+/* Aspect-locked controls (the joystick) only resize from the corners. */
+selection-frame.uniform resize-handle.edge {
+    display: none;
+}
+
 resize-handle.left {
     left: -12dp;
 }

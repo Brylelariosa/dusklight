@@ -317,11 +317,26 @@ touch-stick {
     border-color: rgba(var(--color-white-rgb), 20%);
     opacity: 0;
     pointer-events: none;
+    transform-origin: center;
     transition: opacity 0.18s linear-in-out;
 }
 
 touch-stick.active {
     opacity: 1;
+}
+
+/* A locked stick is always on screen, dimmed until it is touched. */
+touch-stick.locked {
+    opacity: 0.55;
+}
+
+touch-stick.locked.active {
+    opacity: 1;
+}
+
+touch-stick:hidden,
+touch-stick.active:hidden {
+    opacity: 0;
 }
 
 stick-ring {
@@ -337,6 +352,8 @@ stick-ring {
 
 stick-knob {
     position: absolute;
+    left: 38dp;
+    top: 38dp;
     width: 48dp;
     height: 48dp;
     border-radius: 24dp;

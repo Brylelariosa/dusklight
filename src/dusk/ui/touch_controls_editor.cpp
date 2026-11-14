@@ -1,6 +1,7 @@
 #include "touch_controls_editor.hpp"
 
 #include "modal.hpp"
+#include "touch_stick.hpp"
 
 #include "Z2AudioLib/Z2SeMgr.h"
 #include "dusk/config.hpp"
@@ -11,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -309,6 +311,8 @@ void TouchControlsEditor::sync_selection_frame() noexcept {
     }
 
     mSelectionFrame->SetClass("visible", hasSelection);
+    mSelectionFrame->SetClass(
+        "uniform", hasSelection && touch_layout_controls()[mSelectedIndex].uniform);
     for (size_t i = 0; i < mElements.size(); ++i) {
         if (mElements[i].root != nullptr) {
             mElements[i].root->SetClass("editor-selected", hasSelection && i == mSelectedIndex);
@@ -347,7 +351,7 @@ ControlProps TouchControlsEditor::props_for(size_t index) const {
     if (const auto iter = mWorkingLayout.controls.find(info.layoutId);
         iter != mWorkingLayout.controls.end())
     {
-        return iter->second;
+        return sanitize_touch_control_props(info, iter->second);
     }
     return info.props;
 }
@@ -367,6 +371,7 @@ void TouchControlsEditor::store_props(
     props.w = std::max(props.w, 1.f);
     props.h = std::max(props.h, 1.f);
     props.scale = std::max(props.scale, kMinScale);
+    props = sanitize_touch_control_props(touch_layout_controls()[index], props);
     props = encode_control_props(visual, docSize, props, touch_control_dock_anchor(visual, docSize));
     mWorkingLayout.version = ControlLayout::Version;
     mWorkingLayout.controls[std::string{touch_layout_controls()[index].layoutId}] = props;
@@ -394,6 +399,13 @@ bool TouchControlsEditor::begin_edit(
     size_t index, EditHandle handle, Rml::Vector2f positionPx, bool touch,
     SDL_FingerID touchId) noexcept {
     if (!control_valid(index) || mPointerEdit.active) {
+        return false;
+    }
+    // Aspect-locked controls (the joystick) resize from the corners only. The edge handles are
+    // hidden for them; this also keeps a stray edge drag from distorting one.
+    if (touch_layout_controls()[index].uniform &&
+        (is_horizontal_edge(handle) || is_vertical_edge(handle)))
+    {
         return false;
     }
 
@@ -527,9 +539,12 @@ ControlRect TouchControlsEditor::rect_for_edit(
             minSize.y / std::max(edit.startVisual.h, 1.f));
     const float maxW = left ? fixed.x : docSize.w - fixed.x;
     const float maxH = top ? fixed.y : docSize.h - fixed.y;
-    const float maxRatio =
-        std::max(minRatio, std::min(maxW / std::max(edit.startVisual.w, 1.f),
-                                maxH / std::max(edit.startVisual.h, 1.f)));
+    const auto maxSize = max_visual_size(edit.index);
+    const float maxRatio = std::max(minRatio,
+        std::min({maxW / std::max(edit.startVisual.w, 1.f),
+            maxH / std::max(edit.startVisual.h, 1.f),
+            maxSize.x / std::max(edit.startVisual.w, 1.f),
+            maxSize.y / std::max(edit.startVisual.h, 1.f)}));
     const float ratio =
         std::clamp(std::max(desiredW / std::max(edit.startVisual.w, 1.f),
                        desiredH / std::max(edit.startVisual.h, 1.f)),
@@ -553,8 +568,11 @@ ControlRect TouchControlsEditor::clamp_visual_rect(size_t index, ControlRect rec
     const auto minSize = min_visual_size(index);
     const float minW = std::min(minSize.x, docSize.w);
     const float minH = std::min(minSize.y, docSize.h);
-    rect.w = std::clamp(rect.w, minW, docSize.w);
-    rect.h = std::clamp(rect.h, minH, docSize.h);
+    const auto maxSize = max_visual_size(index);
+    const float maxW = std::max(minW, std::min(docSize.w, maxSize.x));
+    const float maxH = std::max(minH, std::min(docSize.h, maxSize.y));
+    rect.w = std::clamp(rect.w, minW, maxW);
+    rect.h = std::clamp(rect.h, minH, maxH);
     rect.l = std::clamp(rect.l, 0.f, std::max(0.f, docSize.w - rect.w));
     rect.t = std::clamp(rect.t, 0.f, std::max(0.f, docSize.h - rect.h));
     return rect;
@@ -566,6 +584,10 @@ Rml::Vector2f TouchControlsEditor::min_visual_size(size_t index) const noexcept 
     }
 
     const auto id = touch_layout_controls()[index].layoutId;
+    if (id == kStickLayoutId) {
+        const float size = stick::kBaseSizeDp * stick::kMinScale;
+        return {size, size};
+    }
     if (id == "actionBar") {
         return {kMinActionBarWidthDp, kMinActionBarHeightDp};
     }
@@ -573,6 +595,15 @@ Rml::Vector2f TouchControlsEditor::min_visual_size(size_t index) const noexcept 
         return {kMinTriggerWidthDp, kMinTriggerHeightDp};
     }
     return {kMinControlDp, kMinControlDp};
+}
+
+Rml::Vector2f TouchControlsEditor::max_visual_size(size_t index) const noexcept {
+    if (control_valid(index) && is_stick_layout_control(touch_layout_controls()[index])) {
+        const float size = stick::kBaseSizeDp * stick::kMaxScale;
+        return {size, size};
+    }
+    constexpr float kUnbounded = std::numeric_limits<float>::max();
+    return {kUnbounded, kUnbounded};
 }
 
 bool TouchControlsEditor::handle_nav_command(Rml::Event& event, NavCommand cmd) {

@@ -964,6 +964,31 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                 pane.clear();
                 pane.add_text("Open the touch controls layout editor.");
             });
+        addOption("Lock Joystick", getSettings().game.touchStickLocked,
+            "Keeps the joystick fixed on screen instead of appearing under your thumb.<br/><br/>"
+            "Place it with Customize Layout. When off, the joystick appears wherever you touch the "
+            "left side of the screen.",
+            [] { return !getSettings().game.enableTouchControls; });
+        auto& joystickSize = leftPane.add_child<NumberButton>(NumberButton::Props{
+            .key = "Joystick Size",
+            .getValue = [] { return touch_stick_size_percent(); },
+            .setValue =
+                [](int value) {
+                    set_touch_stick_size_percent(value);
+                    config::save();
+                },
+            .isDisabled = [] { return !getSettings().game.enableTouchControls; },
+            .isModified = [] { return touch_stick_size_percent() != 100; },
+            .min = 50,
+            .max = 200,
+            .step = 5,
+            .suffix = "%",
+        });
+        leftPane.register_control(joystickSize, rightPane, [](Pane& pane) {
+            pane.clear();
+            pane.add_rml("Adjusts the size of the joystick, from 50% to 200%.<br/><br/>You can "
+                         "also resize it by dragging its corner in Customize Layout.");
+        });
         leftPane.register_control(
             leftPane.add_select_button({
                 .key = "Touch Targeting",

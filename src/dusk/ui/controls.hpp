@@ -1,6 +1,9 @@
 #pragma once
 
+#include <array>
 #include <map>
+#include <string>
+#include <string_view>
 
 namespace dusk::ui {
 
@@ -82,7 +85,10 @@ struct ControlLayout {
     bool operator==(const ControlLayout&) const = default;
 };
 
-constexpr std::array<std::string_view, 9> kControlLayoutIds = {
+// Layout id of the movement joystick. Only its position (when locked) and scale are customizable.
+constexpr std::string_view kStickLayoutId = "stick";
+
+constexpr std::array<std::string_view, 10> kControlLayoutIds = {
     "actionBar",
     "buttonA",
     "buttonB",
@@ -90,6 +96,7 @@ constexpr std::array<std::string_view, 9> kControlLayoutIds = {
     "buttonY",
     "buttonZ",
     "skip",
+    kStickLayoutId,
     "triggerL",
     "triggerR",
 };

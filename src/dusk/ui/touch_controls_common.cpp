@@ -1,5 +1,9 @@
 #include "touch_controls_common.hpp"
 
+#include "touch_stick.hpp"
+
+#include "dusk/settings.h"
+
 #include <aurora/rmlui.hpp>
 
 #include <algorithm>
@@ -143,9 +147,27 @@ constexpr std::array<TouchLayoutControlInfo, kTouchLayoutControlCount> kLayoutCo
         .control = Control::A,
         .hasControl = true,
     },
+    {
+        .layoutId = "stick",
+        .elementId = "control-stick",
+        .props =
+            {
+                .x = 56.f,
+                .y = 64.f,
+                .w = stick::kBaseSizeDp,
+                .h = stick::kBaseSizeDp,
+                .scale = 1.f,
+                .anchor = ControlAnchor::BottomLeft,
+            },
+        .uniform = true,
+    },
 }};
 
 constexpr std::string_view kTouchControlsRmlFragment = R"RML(
+    <touch-stick id="control-stick" class="control stick">
+        <stick-ring />
+        <stick-knob id="control-knob" />
+    </touch-stick>
     <button id="trigger-l" class="control trigger trigger-l"><span>L</span></button>
     <action-bar id="action-bar" class="control">
         <button id="items" class="utility items"><icon><glyph>&#xeb0e;</glyph></icon></button>
@@ -193,6 +215,73 @@ const TouchLayoutControlInfo* find_touch_layout_control(Control control) noexcep
         }
     }
     return nullptr;
+}
+
+ControlProps sanitize_touch_control_props(
+    const TouchLayoutControlInfo& info, ControlProps props) noexcept {
+    if (info.uniform) {
+        props.w = stick::kBaseSizeDp;
+        props.h = stick::kBaseSizeDp;
+        props.scale = stick::clamp_scale(props.scale);
+    }
+    return props;
+}
+
+namespace {
+
+// Saved props for the joystick (or its default), already sanitized.
+ControlProps stick_props(const ControlLayout& layout, const TouchLayoutControlInfo& info) {
+    ControlProps props = info.props;
+    if (const auto iter = layout.controls.find(info.layoutId); iter != layout.controls.end()) {
+        props = iter->second;
+    }
+    return sanitize_touch_control_props(info, props);
+}
+
+}  // namespace
+
+int touch_stick_size_percent() noexcept {
+    const auto* info = find_touch_layout_control(kStickLayoutId);
+    if (info == nullptr) {
+        return 100;
+    }
+    const auto props = stick_props(getSettings().game.touchControlsLayout.getValue(), *info);
+    return static_cast<int>(std::lround(props.scale * 100.f));
+}
+
+void set_touch_stick_size_percent(int percent) {
+    const auto* info = find_touch_layout_control(kStickLayoutId);
+    if (info == nullptr) {
+        return;
+    }
+
+    auto& var = getSettings().game.touchControlsLayout;
+    auto layout = var.getValue();
+    const auto oldProps = stick_props(layout, *info);
+    auto props = oldProps;
+    props.scale = stick::clamp_scale(static_cast<float>(percent) / 100.f);
+
+    // Resize around the stick's centre (like pinching it) and keep it on screen. The position is
+    // re-encoded the same way the layout editor does, so it stays right on any screen size.
+    const auto docSize = touch_document_size_dp(aurora::rmlui::get_context());
+    if (docSize.w > 0.f && docSize.h > 0.f) {
+        const auto before = resolve_control_layout(oldProps, docSize).visual;
+        const float size = props.w * props.scale;
+        ControlRect visual{
+            .l = before.l + (before.w - size) * 0.5f,
+            .t = before.t + (before.h - size) * 0.5f,
+            .w = size,
+            .h = size,
+        };
+        visual.l = std::clamp(visual.l, 0.f, std::max(0.f, docSize.w - visual.w));
+        visual.t = std::clamp(visual.t, 0.f, std::max(0.f, docSize.h - visual.h));
+        props = encode_control_props(
+            visual, docSize, props, touch_control_dock_anchor(visual, docSize));
+    }
+
+    layout.version = ControlLayout::Version;
+    layout.controls[std::string{info->layoutId}] = props;
+    var.setValue(std::move(layout));
 }
 
 SDL_FingerID touch_event_id(const Rml::Event& event) noexcept {

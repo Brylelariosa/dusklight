@@ -6,6 +6,7 @@
 #include "dusk/action_bindings.h"
 #include "dusk/menu_pointer.h"
 #include "dusk/ui/controls.hpp"
+#include "touch_stick.hpp"
 
 #include <array>
 #include <bitset>
@@ -41,6 +42,8 @@ private:
         Rml::Vector2f start;
         Rml::Vector2f current;
         bool active = false;
+        // Locked stick: output is measured from the stick's fixed centre instead of `start`.
+        bool anchored = false;
     };
     struct ControlTouch {
         SDL_FingerID id = 0;
@@ -75,6 +78,14 @@ private:
     void set_control_visual(Control control, bool pressed) noexcept;
     void sync_l_lock_state() noexcept;
     void clear_motion_touch_input() noexcept;
+    void begin_move_touch(SDL_FingerID id, Rml::Vector2f position, bool anchored) noexcept;
+    std::optional<stick::Vec2> stick_center_px() const noexcept;
+    std::optional<stick::Vec2> stick_origin_px(const StickTouch& touch) const noexcept;
+    bool touch_grabs_locked_stick(Rml::Vector2f position) const noexcept;
+    void sync_stick_layout(const ResolvedControlLayout& layout) noexcept;
+    void sync_stick_visual() noexcept;
+    void apply_stick_knob_offset(Rml::Vector2f offsetDp) noexcept;
+    void set_stick_hidden(bool hidden) noexcept;
     void clear_control_input() noexcept;
     void clear_virtual_input() noexcept;
     void sync_touch_state() noexcept;
@@ -116,6 +127,8 @@ private:
     std::array<bool, static_cast<size_t>(Control::COUNT)> mControlVisualPressed{};
     std::bitset<static_cast<size_t>(ActionBinds::COUNT)> mQueuedActions;
     LayoutState mActionBarLayout;
+    LayoutState mStickLayout;
+    std::optional<Rml::Vector2f> mAppliedKnobOffset;
     Insets mSafeInsets;
     u16 mButtonMask = 0;
     bool mLPressed = false;

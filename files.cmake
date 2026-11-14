@@ -1670,6 +1670,7 @@ set(DUSK_FILES
         src/dusk/ui/touch_controls_common.hpp
         src/dusk/ui/touch_controls_editor.cpp
         src/dusk/ui/touch_controls_editor.hpp
+        src/dusk/ui/touch_stick.hpp
         src/dusk/ui/ui.cpp
         src/dusk/ui/ui.hpp
         src/dusk/ui/warp.cpp

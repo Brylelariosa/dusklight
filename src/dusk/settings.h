@@ -278,6 +278,7 @@ struct UserSettings {
         ConfigVar<TouchTargeting> touchTargeting;
         ConfigVar<bool> enableMenuPointer;
         ConfigVar<ui::ControlLayout> touchControlsLayout;
+        ConfigVar<bool> touchStickLocked;
         ConfigVar<bool> invertCameraXAxis;
         ConfigVar<bool> invertCameraYAxis;
         ConfigVar<bool> invertFirstPersonXAxis;

@@ -30,8 +30,6 @@ namespace dusk::ui {
 namespace {
 
 constexpr u32 kPort = PAD_CHAN0;
-constexpr float kStickRadiusDp = 62.f;
-constexpr float kStickKnobRadiusDp = 24.f;
 constexpr float kAnalogZoneTopDp = 92.f;
 constexpr float kAnalogZoneBottomDp = 30.f;
 constexpr float kLeftZoneWidth = 0.46f;
@@ -137,10 +135,6 @@ Rml::String touch_controls_document_source() {
     <link type="text/rcss" href="res/rml/touch_controls.rcss" />
 </head>
 <body id="root">
-    <touch-stick id="control-stick">
-        <stick-ring />
-        <stick-knob id="control-knob" />
-    </touch-stick>
 )RML"} + Rml::String{fragment.data(), fragment.size()} +
            Rml::String{R"RML(
 </body>
@@ -178,6 +172,10 @@ enum class StickOutput {
     CStick,
 };
 
+bool stick_locked() noexcept {
+    return getSettings().game.touchStickLocked.getValue();
+}
+
 StickOutput stick_output_mode() noexcept {
     if (fishing_controls_active() || hawkeye_active()) {
         return StickOutput::CStick;
@@ -205,14 +203,6 @@ bool controls_available(bool allowItemWheel) noexcept {
     }
 
     return true;
-}
-
-Rml::Vector2f clamped_stick_delta(
-    Rml::Vector2f start, Rml::Vector2f current, float stickRadius) noexcept {
-    Rml::Vector2f delta = current - start;
-    const float length = std::sqrt(delta.x * delta.x + delta.y * delta.y);
-    delta *= length > stickRadius ? stickRadius / length : 1.f;
-    return delta;
 }
 
 struct FaceButtonState {
@@ -691,6 +681,111 @@ void TouchControls::clear_motion_touch_input() noexcept {
     if (mControlStick != nullptr) {
         mControlStick->SetClass("active", false);
     }
+    apply_stick_knob_offset(Rml::Vector2f{0.f, 0.f});
+}
+
+void TouchControls::begin_move_touch(
+    SDL_FingerID id, Rml::Vector2f position, bool anchored) noexcept {
+    mMoveTouch = {
+        .id = id,
+        .start = position,
+        .current = position,
+        .active = true,
+        .anchored = anchored,
+    };
+}
+
+std::optional<stick::Vec2> TouchControls::stick_center_px() const noexcept {
+    if (!mStickLayout.visualRect) {
+        return std::nullopt;
+    }
+    const auto& rect = *mStickLayout.visualRect;
+    const float dpScale = touch_dp_scale();
+    return stick::Vec2{(rect.l + rect.w * 0.5f) * dpScale, (rect.t + rect.h * 0.5f) * dpScale};
+}
+
+std::optional<stick::Vec2> TouchControls::stick_origin_px(const StickTouch& touch) const noexcept {
+    if (touch.anchored) {
+        return stick_center_px();
+    }
+    return stick::Vec2{touch.start.x, touch.start.y};
+}
+
+bool TouchControls::touch_grabs_locked_stick(Rml::Vector2f position) const noexcept {
+    const auto center = stick_center_px();
+    if (!center) {
+        return false;
+    }
+    const float radius = stick::radius_px(mStickLayout.layoutScale, touch_dp_scale());
+    return stick::within_grab_area({position.x, position.y}, *center, radius);
+}
+
+void TouchControls::sync_stick_layout(const ResolvedControlLayout& layout) noexcept {
+    mStickLayout.visualRect = layout.visual;
+    mStickLayout.layoutScale = layout.scale;
+    apply_control_transform_if_changed(mControlStick, mStickLayout.appliedTransform, layout.scale);
+    // A floating stick positions itself under the finger (see sync_stick_visual); only a locked
+    // stick follows the saved layout.
+    if (stick_locked()) {
+        apply_control_box_if_changed(mControlStick, mStickLayout.appliedBox, layout.box);
+    }
+}
+
+void TouchControls::sync_stick_visual() noexcept {
+    if (mControlStick == nullptr || mControlKnob == nullptr) {
+        return;
+    }
+
+    mControlStick->SetClass("locked", stick_locked());
+
+    Rml::Vector2f knobOffset{0.f, 0.f};
+    bool active = false;
+    if (mMoveTouch.active) {
+        if (const auto origin = stick_origin_px(mMoveTouch)) {
+            const float dpScale = touch_dp_scale();
+            const float scale = mStickLayout.layoutScale;
+            const auto delta = stick::clamped_delta(
+                *origin, {mMoveTouch.current.x, mMoveTouch.current.y},
+                stick::radius_px(scale, dpScale));
+            const auto offset = stick::knob_offset_dp(delta, dpScale, scale);
+            knobOffset = Rml::Vector2f{offset.x, offset.y};
+            active = true;
+            if (!mMoveTouch.anchored) {
+                // Floating stick: centre the ring under the finger that started it.
+                apply_control_box_if_changed(mControlStick, mStickLayout.appliedBox,
+                    {
+                        .l = mMoveTouch.start.x / dpScale - stick::kBaseRadiusDp,
+                        .t = mMoveTouch.start.y / dpScale - stick::kBaseRadiusDp,
+                        .w = stick::kBaseSizeDp,
+                        .h = stick::kBaseSizeDp,
+                    });
+            }
+        }
+    }
+    mControlStick->SetClass("active", active);
+    apply_stick_knob_offset(knobOffset);
+}
+
+void TouchControls::apply_stick_knob_offset(Rml::Vector2f offsetDp) noexcept {
+    if (mControlKnob == nullptr ||
+        (mAppliedKnobOffset && control_float_near(mAppliedKnobOffset->x, offsetDp.x) &&
+            control_float_near(mAppliedKnobOffset->y, offsetDp.y)))
+    {
+        return;
+    }
+
+    constexpr float kCentre = stick::kBaseRadiusDp - stick::kKnobRadiusDp;
+    mControlKnob->SetProperty(
+        Rml::PropertyId::Left, Rml::Property(kCentre + offsetDp.x, Rml::Unit::DP));
+    mControlKnob->SetProperty(
+        Rml::PropertyId::Top, Rml::Property(kCentre + offsetDp.y, Rml::Unit::DP));
+    mAppliedKnobOffset = offsetDp;
+}
+
+void TouchControls::set_stick_hidden(bool hidden) noexcept {
+    if (mControlStick != nullptr) {
+        mControlStick->SetPseudoClass("hidden", hidden);
+    }
 }
 
 void TouchControls::clear_control_input() noexcept {
@@ -741,30 +836,12 @@ void TouchControls::sync_touch_state() noexcept {
         if (!mCameraTouch.active) {
             mCameraTouch = mMoveTouch;
             mCameraTouch.start = mMoveTouch.current;
+            mCameraTouch.anchored = false;
         }
         mMoveTouch = {};
     }
 
-    const float stickRadius = kStickRadiusDp * touch_dp_scale();
-    if (mControlStick != nullptr) {
-        if (mMoveTouch.active && stickRadius > 0.f) {
-            const auto delta =
-                clamped_stick_delta(mMoveTouch.start, mMoveTouch.current, stickRadius);
-            const float knobRadius = kStickKnobRadiusDp * touch_dp_scale();
-            mControlStick->SetClass("active", true);
-            mControlStick->SetProperty(Rml::PropertyId::Left,
-                Rml::Property(mMoveTouch.start.x - stickRadius, Rml::Unit::PX));
-            mControlStick->SetProperty(Rml::PropertyId::Top,
-                Rml::Property(mMoveTouch.start.y - stickRadius, Rml::Unit::PX));
-            mControlKnob->SetProperty(Rml::PropertyId::Left,
-                Rml::Property(stickRadius + delta.x - knobRadius, Rml::Unit::PX));
-            mControlKnob->SetProperty(Rml::PropertyId::Top,
-                Rml::Property(stickRadius + delta.y - knobRadius, Rml::Unit::PX));
-        } else {
-            mControlStick->SetClass("active", false);
-        }
-    }
-
+    sync_stick_visual();
     sync_visual_state();
 }
 
@@ -787,21 +864,25 @@ void TouchControls::sync_virtual_input() noexcept {
         status.triggerRight = kTriggerAnalog;
     }
 
-    const float stickRadius = kStickRadiusDp * touch_dp_scale();
-    if (mMoveTouch.active && stickRadius > 0.f) {
-        const auto delta = clamped_stick_delta(mMoveTouch.start, mMoveTouch.current, stickRadius);
-        const float stickX = stick_value(delta.x / stickRadius);
-        const float stickY = stick_value(-delta.y / stickRadius);
-        switch (stick_output_mode()) {
-        case StickOutput::CStick:
-            status.substickX = stickX;
-            status.substickY = stickY;
-            break;
-        case StickOutput::MainStick:
-        default:
-            status.stickX = stickX;
-            status.stickY = stickY;
-            break;
+    if (mMoveTouch.active) {
+        if (const auto origin = stick_origin_px(mMoveTouch)) {
+            const float radius = stick::radius_px(mStickLayout.layoutScale, touch_dp_scale());
+            const auto delta = stick::clamped_delta(
+                *origin, {mMoveTouch.current.x, mMoveTouch.current.y}, radius);
+            const auto axes = stick::axes(delta, radius);
+            const s8 stickX = stick_value(axes.x);
+            const s8 stickY = stick_value(axes.y);
+            switch (stick_output_mode()) {
+            case StickOutput::CStick:
+                status.substickX = stickX;
+                status.substickY = stickY;
+                break;
+            case StickOutput::MainStick:
+            default:
+                status.stickX = stickX;
+                status.stickY = stickY;
+                break;
+            }
         }
     }
 
@@ -868,7 +949,12 @@ void TouchControls::sync_control_layouts() noexcept {
             props = iter->second;
         }
 
-        const auto layout = resolve_control_layout(props, docSize);
+        const auto layout =
+            resolve_control_layout(sanitize_touch_control_props(info, props), docSize);
+        if (is_stick_layout_control(info)) {
+            sync_stick_layout(layout);
+            continue;
+        }
         if (info.hasControl) {
             const auto index = static_cast<size_t>(info.control);
             if (index >= mControlElements.size()) {
@@ -898,6 +984,7 @@ void TouchControls::sync_control_layouts() noexcept {
 void TouchControls::sync_visual_state() noexcept {
     if (mWasSuppressed || !getSettings().game.enableTouchControls) {
         clear_motion_touch_input();
+        set_stick_hidden(true);
         for (const auto control : {Control::L, Control::R}) {
             const auto& elements = mControlElements[static_cast<size_t>(control)];
             if (elements.root != nullptr) {
@@ -909,6 +996,11 @@ void TouchControls::sync_visual_state() noexcept {
     }
 
     const bool hideGameplayControls = game_controls_suppressed();
+    // A locked stick stays on screen, so tuck it away with the other gameplay controls and while
+    // aiming (when the left side of the screen drives the camera instead of movement). A floating
+    // stick only exists while touched and is never hidden.
+    set_stick_hidden(stick_locked() &&
+                     (hideGameplayControls || (dCamera_c::isAimActive() && !hawkeye_active())));
     const auto& lTrigger = mControlElements[static_cast<size_t>(Control::L)];
     const auto& rTrigger = mControlElements[static_cast<size_t>(Control::R)];
     const bool lHidden = hideGameplayControls && !control_override_active(Control::L);
@@ -1259,15 +1351,16 @@ void TouchControls::handle_touch_down(Rml::Event& event) noexcept {
     const auto width = static_cast<float>(dimensions.x);
     const bool inAnalogZone = position.y >= top && position.y <= bottom;
     const bool inLeftZone = position.x < width * kLeftZoneWidth;
+
+    // A floating stick appears under any touch in the left analog zone. A locked stick is only
+    // grabbed by touching it, wherever the player placed it.
+    const bool locked = stick_locked();
+    const bool grabsStick =
+        locked ? touch_grabs_locked_stick(position) : (inAnalogZone && inLeftZone);
     if (dCamera_c::isAimActive()) {
-        if (hawkeye_active() && inAnalogZone && inLeftZone) {
+        if (hawkeye_active() && grabsStick) {
             if (!mMoveTouch.active) {
-                mMoveTouch = {
-                    .id = id,
-                    .start = position,
-                    .current = position,
-                    .active = true,
-                };
+                begin_move_touch(id, position, locked);
             }
             return;
         }
@@ -1283,18 +1376,9 @@ void TouchControls::handle_touch_down(Rml::Event& event) noexcept {
         return;
     }
 
-    if (!inAnalogZone) {
-        return;
-    }
-
-    if (!mMoveTouch.active && inLeftZone) {
-        mMoveTouch = {
-            .id = id,
-            .start = position,
-            .current = position,
-            .active = true,
-        };
-    } else if (!mCameraTouch.active && position.x > width * kRightZoneStart) {
+    if (!mMoveTouch.active && grabsStick) {
+        begin_move_touch(id, position, locked);
+    } else if (inAnalogZone && !mCameraTouch.active && position.x > width * kRightZoneStart) {
         mCameraTouch = {
             .id = id,
             .start = position,
